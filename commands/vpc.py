@@ -10,7 +10,7 @@ def create_vpc(ec2_client, vpc_name: str, vpc_cidr: str):
     :param vpc_cidr: CIDR notation of IP range with subnet mask 255.255.0.0
     :return: None
     """
-    ec2_client.create_vpc(
+    response = ec2_client.create_vpc(
         CidrBlock=vpc_cidr,
         TagSpecifications=[
             {
@@ -18,6 +18,11 @@ def create_vpc(ec2_client, vpc_name: str, vpc_cidr: str):
                 "Tags": [{"Key": "Name", "Value": vpc_name}]
             }
         ]
+    )
+    vpc_id = response["Vpc"]["VpcId"]
+    ec2_client.modify_vpc_attribute(
+        EnableDnsHostnames={"Value": True},
+        VpcId=vpc_id
     )
 
 
@@ -74,15 +79,18 @@ def create_subnet(
         cidr_substitute: str,
         region_name: str,
         az_postfix: str,
+        is_public: bool,
 ):
     """
-    Create a subnet within a VPC
+    Create a subnet within a VPC. If is_public is set to True, then subnet attribute 'MapPubilcIpOnLaunch' is modified
+    to True to assign public IPv4 address to instance created within the subnet.
     :param ec2_client: EC2 client created by boto3 session
     :param vpc_name: name of VPC to create subnet
     :param subnet_name: name of subnet to be created
     :param cidr_substitute: integer between 5 and 254 to be used as substitute for 0 of CIDR block
     :param region_name: name of region
     :param az_postfix: one of ('a', 'b', 'c', 'd') used to specify availability zone within current region
+    :param is_public: whether subnet has to be connected to internet
     :return: None
     """
     vpc_id = fetch_vpc_id(ec2_client, vpc_name)
@@ -92,7 +100,7 @@ def create_subnet(
     subnet_cidr = vpc_info["CidrBlock"].split(".")[:-1]  # ex. '172.50.0.0/16' -> ['172', '50', '0']
     subnet_cidr[2] = cidr_substitute  # ex. ['172', '50', '0'] -> ['172', '50', '100']
     subnet_cidr = f"{'.'.join(subnet_cidr)}.0/24"  # ex. ['172', '50', '100'] -> '172.50.100.0/24'
-    ec2_client.create_subnet(
+    response = ec2_client.create_subnet(
         CidrBlock=subnet_cidr,
         VpcId=vpc_id,
         AvailabilityZone=f"{region_name}{az_postfix}",
@@ -103,6 +111,17 @@ def create_subnet(
             }
         ]
     )
+    subnet_id = response["Subnet"]["SubnetId"]
+    if is_public:
+        ec2_client.modify_subnet_attribute(
+            SubnetId=subnet_id,
+            MapPublicIpOnLaunch={"Value": True},
+        )
+    else:
+        ec2_client.modify_subnet_attribute(
+            SubnetId=subnet_id,
+            MapPublicIpOnLaunch={"Value": False},
+        )
 
 
 def create_route_table(

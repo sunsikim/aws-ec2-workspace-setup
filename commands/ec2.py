@@ -1,5 +1,6 @@
 import pathlib
 import time
+
 from commands.vpc import fetch_vpc_security_group_id, fetch_subnet_id
 
 
@@ -75,21 +76,16 @@ def run_instance(
 
 def allocate_elastic_ip(
         ec2_client,
-        vpc_name: str,
-        subnet_name: str,
+        region_name: str,
         eip_name: str
 ):
     """
     Allocate elastic IP within current subnet region
     :param ec2_client: EC2 client created by boto3 session
-    :param subnet_name: name of subnet
-    :param vpc_name: name of VPC where the subnet belongs to
+    :param region_name: name of region where elastic IP will be defined
     :param eip_name: name of elastic IP
     :return: None
     """
-    subnet_id = fetch_subnet_id(ec2_client, vpc_name, subnet_name)
-    subnet_info = ec2_client.describe_subnets(SubnetIds=[subnet_id])["Subnets"][0]
-    region_name = subnet_info["AvailabilityZone"][:-1]
     ec2_client.allocate_address(
         Domain="vpc",
         NetworkBorderGroup=region_name,
@@ -104,26 +100,23 @@ def allocate_elastic_ip(
 
 def associate_instance_to_elastic_ip(
         ec2_client,
-        vpc_name: str,
-        subnet_name: str,
+        region_name: str,
         instance_name: str,
         eip_name: str,
 ):
     """
     Associate elastic IP with EC2 instance
     :param ec2_client: EC2 client created by boto3 session
-    :param subnet_name: name of subnet where instance is created
-    :param vpc_name: name of VPC where the subnet belongs to
+    :param region_name: name of region where elastic IP is defined
     :param instance_name: name of instance to associate
     :param eip_name: name of elastic IP
     :return: None
     """
-    address_info = fetch_elastic_ip_info(ec2_client, vpc_name, subnet_name, eip_name)
-    allocation_id = address_info[0]["AllocationId"]
+    address_info = fetch_elastic_ip_info(ec2_client, region_name, eip_name)
+    allocation_id = address_info["AllocationId"]
     instance_info = ec2_client.describe_instances(
         Filters=[
             {"Name": "tag:Name", "Values": [instance_name]},
-            {"Name": "subnet-id", "Values": [fetch_subnet_id(ec2_client, vpc_name, subnet_name)]}
         ]
     )["Reservations"][0]["Instances"][0]
     ec2_client.associate_address(
@@ -133,45 +126,55 @@ def associate_instance_to_elastic_ip(
 
 def fetch_elastic_ip_info(
         ec2_client,
-        vpc_name: str,
-        subnet_name: str,
+        region_name: str,
         eip_name: str,
 ):
     """
     Fetch elastic IP information
     :param ec2_client: EC2 client created by boto3 session
-    :param subnet_name: name of subnet with same region with elastic IP
-    :param vpc_name: name of VPC where the subnet belongs to
+    :param region_name: name of region where elastic IP is defined
     :param eip_name: name of elastic IP
     :return: dictionary of elastic IP information
     """
-    subnet_id = fetch_subnet_id(ec2_client, vpc_name, subnet_name)
-    subnet_info = ec2_client.describe_subnets(SubnetIds=[subnet_id])["Subnets"][0]
-    region_name = subnet_info["AvailabilityZone"][:-1]
     address_info = ec2_client.describe_addresses(Filters=[
         {"Name": "tag:Name", "Values": [eip_name]},
         {"Name": "network-border-group", "Values": [region_name]},
     ])["Addresses"]
-    assert len(address_info) > 0, f"Elastic IP for region {region_name} is not created yet"
+    assert len(address_info) > 0, f"Elastic IP of name {eip_name} for region {region_name} does not exists"
     return address_info[0]
 
 
 def disassociate_instance_from_elastic_ip(
         ec2_client,
-        vpc_name: str,
-        subnet_name: str,
+        region_name: str,
         eip_name: str,
 ):
     """
     Disassociate instance from elastic IP
     :param ec2_client: EC2 client created by boto3 session
-    :param subnet_name: name of subnet where instance is created
-    :param vpc_name: name of VPC where the subnet belongs to
+    :param region_name: name of region where elastic IP is defined
     :param eip_name: name of elastic IP to disassociate
     :return: None
     """
-    address_info = fetch_elastic_ip_info(ec2_client, vpc_name, subnet_name, eip_name)
+    address_info = fetch_elastic_ip_info(ec2_client, region_name, eip_name)
+    assert "AssociationId" in address_info, f"Cannot find instance associated with elastic IP '{eip_name}'"
     ec2_client.disassociate_address(AssociationId=address_info["AssociationId"])
+
+
+def release_elastic_ip(
+        ec2_client,
+        region_name: str,
+        eip_name: str,
+):
+    """
+    Release allocated elastic IP from AWS account
+    :param ec2_client: EC2 client created by boto3 session
+    :param region_name: name of region where elastic IP is defined
+    :param eip_name: name of elastic IP to release
+    :return: None
+    """
+    address_info = fetch_elastic_ip_info(ec2_client, region_name, eip_name)
+    ec2_client.release_address(AllocationId=address_info["AllocationId"])
 
 
 def stop_instance(
@@ -194,7 +197,74 @@ def stop_instance(
             {"Name": "subnet-id", "Values": [fetch_subnet_id(ec2_client, vpc_name, subnet_name)]}
         ]
     )["Reservations"][0]["Instances"][0]
-    ec2_client.stop_instances(InstanceIds=[instance_info["InstanceId"]])
+    instance_id = instance_info["InstanceId"]
+    ec2_client.stop_instances(InstanceIds=[instance_id])
+    is_stopped = False
+    while not is_stopped:
+        time.sleep(3)
+        response = ec2_client.describe_instances(InstanceIds=[instance_id])
+        instance_info = response["Reservations"][0]["Instances"][0]
+        is_stopped = instance_info["State"]["Name"] == "stopped"
+
+
+def start_instance(
+        ec2_client,
+        vpc_name: str,
+        subnet_name: str,
+        instance_name: str,
+):
+    """
+    Start stopped EC2 instance
+    :param ec2_client: EC2 client created by boto3 session
+    :param subnet_name: name of subnet where instance is created
+    :param vpc_name: name of VPC where the subnet belongs to
+    :param instance_name: name of instance to stop
+    :return: None
+    """
+    instance_info = ec2_client.describe_instances(
+        Filters=[
+            {"Name": "tag:Name", "Values": [instance_name]},
+            {"Name": "subnet-id", "Values": [fetch_subnet_id(ec2_client, vpc_name, subnet_name)]}
+        ]
+    )["Reservations"][0]["Instances"][0]
+    instance_id = instance_info["InstanceId"]
+    ec2_client.start_instances(InstanceIds=[instance_id])
+    is_running = False
+    while not is_running:
+        time.sleep(3)
+        response = ec2_client.describe_instances(InstanceIds=[instance_id])
+        instance_info = response["Reservations"][0]["Instances"][0]
+        is_running = instance_info["State"]["Name"] == "running"
+
+
+def reboot_instance(
+        ec2_client,
+        vpc_name: str,
+        subnet_name: str,
+        instance_name: str,
+):
+    """
+    Reboot EC2 instance
+    :param ec2_client: EC2 client created by boto3 session
+    :param subnet_name: name of subnet where instance is created
+    :param vpc_name: name of VPC where the subnet belongs to
+    :param instance_name: name of instance to stop
+    :return: None
+    """
+    instance_info = ec2_client.describe_instances(
+        Filters=[
+            {"Name": "tag:Name", "Values": [instance_name]},
+            {"Name": "subnet-id", "Values": [fetch_subnet_id(ec2_client, vpc_name, subnet_name)]}
+        ]
+    )["Reservations"][0]["Instances"][0]
+    instance_id = instance_info["InstanceId"]
+    ec2_client.reboot_instances(InstanceIds=[instance_info["InstanceId"]])
+    is_running = False
+    while not is_running:
+        time.sleep(3)
+        response = ec2_client.describe_instances(InstanceIds=[instance_id])
+        instance_info = response["Reservations"][0]["Instances"][0]
+        is_running = instance_info["State"]["Name"] == "running"
 
 
 def terminate_instance(

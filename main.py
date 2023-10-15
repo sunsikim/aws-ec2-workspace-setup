@@ -160,9 +160,17 @@ def manage_instance(
             subnet_name=subnet_name,
             instance_name=instance_name,
         )
+    elif action_type.lower() == "describe":
+        ec2_commands.describe_instance(
+            ec2_client=ec2_client,
+            vpc_name=vpc_name,
+            subnet_name=subnet_name,
+            instance_name=instance_name,
+        )
+    
     else:
         raise ValueError(
-            f"action_type must be one of ('run', 'start', 'stop', 'reboot', 'terminate'); got: '{action_type}'"
+            f"action_type must be one of ('run', 'start', 'stop', 'reboot', 'terminate', 'describe'); got: '{action_type}'"
         )
 
 

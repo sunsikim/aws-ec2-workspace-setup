@@ -287,7 +287,50 @@ def terminate_instance(
             {"Name": "subnet-id", "Values": [fetch_subnet_id(ec2_client, vpc_name, subnet_name)]}
         ]
     )["Reservations"][0]["Instances"][0]
-    ec2_client.terminate_instances(InstanceIds=[instance_info["InstanceId"]])
+    instance_id = instance_info["InstanceId"]
+    ec2_client.terminate_instances(InstanceIds=[instance_id])
+    is_terminated = False
+    while not is_terminated:
+        time.sleep(3)
+        response = ec2_client.describe_instances(InstanceIds=[instance_id])
+        instance_info = response["Reservations"][0]["Instances"][0]
+        is_terminated = instance_info["State"]["Name"] == "terminated"
+
+
+def describe_instance(
+        ec2_client,
+        vpc_name: str,
+        subnet_name: str,
+        instance_name: str,
+):
+    """
+    Print current status of the created instance
+    :param ec2_client: EC2 client created by boto3 session
+    :param subnet_name: name of subnet where instance is created
+    :param vpc_name: name of VPC where the subnet belongs to
+    :param instance_name: name of instance to stop
+    :return: None
+    """
+    try:
+        response = ec2_client.describe_instances(
+            Filters=[
+                {
+                    "Name": "subnet-id",
+                    "Values": [fetch_subnet_id(ec2_client, vpc_name, subnet_name)]
+                },
+                {
+                    "Name": "tag:Name",
+                    "Values": [instance_name]
+                }
+            ]
+        )
+        instance_info = response["Reservations"][0]["Instances"][0]
+        state = instance_info["State"]["Name"]
+        print(f"CURRENT STATE  : {state}")
+        if state == "running":
+            print(f'LAUNCH COMMAND : ssh -i "awselk.pem" ubuntu@{instance_info["PublicDnsName"]}')
+    except Exception:
+        print("Instance has not been created yet")
 
 
 def delete_key_pair(
